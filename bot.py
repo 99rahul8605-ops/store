@@ -172,6 +172,145 @@ class FileBot:
             payload["reply_markup"] = buttons
         return await self.tg("sendMessage", **payload)
 
+    async def pending_admin_input(self, user_id: int, action: str, prompt: str):
+        await self.db.execute("""INSERT INTO blbot_admin_input(user_id,action)
+             VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE
+             SET action=EXCLUDED.action,created_at=NOW()""", user_id, action)
+        await self.say(user_id, prompt + "\n\nSend /cancel to exit. Reply within 10 minutes.")
+
+    async def display_text(self, kind: str, user: dict | None = None) -> str:
+        if kind == "start":
+            default = "👋 Hi There... {first_name}! 💥\n\nI am a premium file store bot.\nSend or open a file link to get started.\n\nPowered By: {powered_by}"
+        else:
+            default = "📊 HEY BRO/SIS,\n\nYOUR LINK IS READY! CLICK THE DOWNLOAD BUTTON BELOW 👇\n\nTO BUY PREMIUM, CONTACT: {admin_contact}"
+        template = await self.config(kind + "_caption", default)
+        fields = {
+            "first_name": html.escape(str((user or {}).get("first_name") or "Friend")[:64]),
+            "username": html.escape(str((user or {}).get("username") or "Guest")[:64]),
+            "admin_contact": html.escape(await self.config("admin_contact", "@YourAdmin")),
+            "powered_by": html.escape(await self.config("powered_by", "BingoLink")),
+        }
+        # Only explicitly supported substitutions. Never interpret user-written caption as HTML.
+        output = html.escape(template)
+        for key, value in fields.items():
+            output = output.replace("{" + key + "}", value)
+        return output[:1000]  # Telegram photo captions have a 1024-character limit.
+
+    async def themed_message(self, chat: int, kind: str, user: dict | None = None,
+                             buttons: dict | None = None):
+        caption = await self.display_text(kind, user)
+        photo = await self.config(kind + "_photo", "")
+        if photo:
+            try:
+                return await self.tg("sendPhoto", chat_id=chat, photo=photo,
+                                     caption=caption, parse_mode="HTML", reply_markup=buttons)
+            except TelegramError as exc:
+                LOG.warning("Saved %s photo failed; falling back to text: %s", kind, exc)
+        return await self.say(chat, caption, buttons)
+
+    async def start_buttons(self):
+        rows = []
+        if await self.config("help_button", "on") == "on":
+            rows.append([row_button(await self.config("help_label", "HELP"), data="public:help")])
+        if await self.config("close_button", "on") == "on":
+            rows.append([row_button(await self.config("close_label", "CLOSE"), data="public:close")])
+        return kb(*rows) if rows else None
+
+    async def link_buttons(self, short: str):
+        rows = [[row_button(await self.config("download_label", "• CLICK HERE TO DOWNLOAD •"), url=short)]]
+        extras = []
+        for section in ("premium", "tutorial"):
+            if await self.config(section + "_button", "on") == "on":
+                url = await self.config(section + "_url", "")
+                if url:
+                    extras.append(row_button(await self.config(section + "_label", section.upper()), url=url))
+        if extras:
+            rows.append(extras)
+        return kb(*rows)
+
+    async def settings_section(self, user_id: int, section: str):
+        back = [row_button("⬅️ Back to settings", data="settings:menu:main")]
+        if section == "start":
+            await self.say(user_id, "🖼 <b>Start Message</b>\nEdit photo and caption. Use {first_name}, "
+                "{username}, {powered_by} in the text.", kb(
+                    [row_button("📷 Set Photo", data="settings:prompt:start_photo"),
+                     row_button("🗑 Remove Photo", data="settings:clear:start_photo")],
+                    [row_button("✏️ Edit Caption", data="settings:prompt:start_caption"),
+                     row_button("👁 Preview", data="settings:preview:start")],
+                    [row_button("HELP on/off", data="settings:toggle:help_button"),
+                     row_button("CLOSE on/off", data="settings:toggle:close_button")],
+                    [row_button("✏️ HELP Label", data="settings:prompt:help_label"),
+                     row_button("✏️ CLOSE Label", data="settings:prompt:close_label")], back))
+        elif section == "link":
+            await self.say(user_id, "🔗 <b>Link Ready Message</b>\nSet photo, caption, download and "
+                "premium/tutorial buttons. Premium and tutorial buttons appear only when URLs are set.", kb(
+                    [row_button("📷 Set Photo", data="settings:prompt:link_photo"),
+                     row_button("🗑 Remove Photo", data="settings:clear:link_photo")],
+                    [row_button("✏️ Edit Caption", data="settings:prompt:link_caption"),
+                     row_button("👁 Preview", data="settings:preview:link")],
+                    [row_button("✏️ Download Label", data="settings:prompt:download_label")],
+                    [row_button("Premium on/off", data="settings:toggle:premium_button"),
+                     row_button("Tutorial on/off", data="settings:toggle:tutorial_button")],
+                    [row_button("🔗 Premium URL", data="settings:prompt:premium_url"),
+                     row_button("🔗 Tutorial URL", data="settings:prompt:tutorial_url")],
+                    [row_button("✏️ Premium Label", data="settings:prompt:premium_label"),
+                     row_button("✏️ Tutorial Label", data="settings:prompt:tutorial_label")], back))
+        elif section == "branding":
+            await self.say(user_id, "✍️ <b>Branding &amp; Contact</b>", kb(
+                [row_button("👤 Admin Contact", data="settings:prompt:admin_contact")],
+                [row_button("⚡ Powered By", data="settings:prompt:powered_by")], back))
+        elif section == "media":
+            minutes = await self.config("auto_delete_minutes", "60")
+            forward = await self.config("forward_allowed", "off")
+            await self.say(user_id, f"🎞 <b>Files &amp; Backup</b>\nDelete: {minutes} min\nForwarding: {forward}", kb(
+                [row_button("Forward ON/OFF", data="settings:forward"),
+                 row_button("Set Backup", data="settings:prompt:setbackup")],
+                [row_button("Delete OFF", data="settings:delete:0"), row_button("5m", data="settings:delete:5"),
+                 row_button("30m", data="settings:delete:30")],
+                [row_button("1h", data="settings:delete:60"), row_button("6h", data="settings:delete:360"),
+                 row_button("24h", data="settings:delete:1440")], back))
+        elif section == "join":
+            force = await self.config("force_join", "on")
+            await self.say(user_id, f"🔒 <b>Force Join</b>\nStatus: {force}\nPrivate requests count for 24h.", kb(
+                [row_button("Force Join ON/OFF", data="settings:force")],
+                [row_button("➕ Add Channel", data="settings:prompt:addjoin"),
+                 row_button("➖ Remove", data="settings:prompt:rmjoin")],
+                [row_button("📋 Channels &amp; Sudo", data="settings:details")], back))
+        elif section == "team":
+            await self.say(user_id, "👥 <b>Sudo Management</b>\nSudo users upload files, but only the owner "
+                "can change settings.", kb(
+                [row_button("➕ Add Sudo", data="settings:prompt:addsudo"),
+                 row_button("➖ Remove Sudo", data="settings:prompt:remsudo")],
+                [row_button("📋 List", data="settings:details")], back))
+        else:
+            await self.settings_menu(user_id)
+
+    async def save_visual_setting(self, user_id: int, action: str, message: dict):
+        text = (message.get("text") or message.get("caption") or "").strip()
+        if action in ("start_photo", "link_photo"):
+            photos = message.get("photo") or []
+            photo = photos[-1].get("file_id") if photos else None
+            if not photo:
+                return await self.say(user_id, "Send a PHOTO (not as a document), or /cancel.")
+            await self.set_config(action, photo)
+        elif action in ("start_caption", "link_caption"):
+            if not text or len(text) > 800:
+                return await self.say(user_id, "Send text of 1–800 characters, or /cancel.")
+            await self.set_config(action, text)
+        elif action in ("premium_url", "tutorial_url"):
+            parsed = urlsplit(text)
+            if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or len(text) > 400:
+                return await self.say(user_id, "Send a valid HTTPS URL, or /cancel.")
+            await self.set_config(action, text)
+        elif action in ("admin_contact", "powered_by", "download_label", "premium_label", "tutorial_label", "help_label", "close_label"):
+            if not text or len(text) > 100:
+                return await self.say(user_id, "Send 1–100 characters, or /cancel.")
+            await self.set_config(action, text)
+        else:
+            return await self.say(user_id, "Unknown setting. Open /settings again.")
+        await self.db.execute("DELETE FROM blbot_admin_input WHERE user_id=$1", user_id)
+        await self.say(user_id, "✅ Saved. Open /settings to preview or edit another field.")
+
     async def config(self, name: str, default: str = "") -> str:
         val = await self.db.fetchval("SELECT value FROM blbot_settings WHERE key=$1", name)
         return default if val is None else val
@@ -299,10 +438,7 @@ class FileBot:
                     await self.say(user_id, "The shortener is temporarily unavailable. Tap Try Again in a moment.",
                                    kb([row_button("🔄 Try Again", data="retryshare:" + package_id)]))
                     return
-            await self.say(user_id, "🔗 <b>Your unlock link</b>\nOpen BingoLink, finish its article pages, "
-                                    "then tap <b>Get Link</b> to return here and receive your videos. "
-                                    "This unlock is tied to your Telegram account and can be used once.",
-                           kb([row_button("🌐 Open BingoLink", url=short)]))
+            await self.themed_message(user_id, "link", buttons=await self.link_buttons(short))
 
     async def start_redeem(self, user_id: int, raw_token: str):
         if not re.fullmatch(r"[A-Za-z0-9_-]{25,48}", raw_token):
@@ -469,29 +605,16 @@ class FileBot:
         await self.say(user_id, "Bulk draft discarded. Already forwarded backup posts stay in the backup channel.")
 
     async def settings_menu(self, user_id: int):
-        backup = await self.backup_id() or "Not configured"
-        minutes = await self.config("auto_delete_minutes", "60")
-        forward = await self.config("forward_allowed", "off")
-        force = await self.config("force_join", "on")
-        count = await self.db.fetchval("SELECT COUNT(*) FROM blbot_force_chats")
-        sudo = await self.db.fetchval("SELECT COUNT(*) FROM blbot_sudo")
-        await self.say(user_id,
-            "⚙️ <b>File Bot Settings</b>\n"
-            f"Backup: <code>{html.escape(str(backup))}</code>\n"
-            f"Auto-delete DM media: <b>{html.escape(minutes)} min</b> (0=off)\n"
-            f"Forward/save allowed: <b>{html.escape(forward)}</b>\n"
-            f"Force join: <b>{html.escape(force)}</b> ({count} chats)\n"
-            f"Sudo uploaders: <b>{sudo}</b>\n\n"
-            "For backup, force-join and sudo management, tap Commands.",
-            kb(
-                [row_button("Forward ON/OFF", data="settings:forward"), row_button("Force Join ON/OFF", data="settings:force")],
-                [row_button("Delete OFF", data="settings:delete:0"), row_button("5m", data="settings:delete:5"), row_button("30m", data="settings:delete:30")],
-                [row_button("1h", data="settings:delete:60"), row_button("6h", data="settings:delete:360"), row_button("24h", data="settings:delete:1440")],
-                [row_button("➕ Add Join", data="settings:prompt:addjoin"), row_button("➖ Remove Join", data="settings:prompt:rmjoin")],
-                [row_button("➕ Add Sudo", data="settings:prompt:addsudo"), row_button("➖ Remove Sudo", data="settings:prompt:remsudo")],
-                [row_button("Set Backup", data="settings:prompt:setbackup"), row_button("Other Commands", data="settings:help")],
-                [row_button("Channels & Sudo List", data="settings:details")]
-            ))
+        await self.say(user_id, "⚙️ <b>Bot Settings</b>\nChoose a category to expand it. "
+            "Only the owner can change settings.", kb(
+                [row_button("🖼 Start Message", data="settings:menu:start"),
+                 row_button("🔗 Link Message", data="settings:menu:link")],
+                [row_button("✍️ Branding", data="settings:menu:branding"),
+                 row_button("🎞 Files & Backup", data="settings:menu:media")],
+                [row_button("🔒 Force Join", data="settings:menu:join"),
+                 row_button("👥 Sudo", data="settings:menu:team")],
+                [row_button("📊 Stats", data="settings:stats"),
+                 row_button("❔ Commands", data="settings:help")]))
 
     async def settings_details(self, user_id: int):
         channels = await self.db.fetch("SELECT * FROM blbot_force_chats ORDER BY name")
@@ -618,16 +741,18 @@ class FileBot:
             parts = txt.split()
             command = parts[0].split("@")[0].lower()
             args = parts[1:]
+            if command == "/cancel" and uid == self.owner:
+                pending = await self.db.fetchrow("SELECT action FROM blbot_admin_input WHERE user_id=$1", uid)
+                if pending:
+                    await self.db.execute("DELETE FROM blbot_admin_input WHERE user_id=$1", uid)
+                    return await self.say(uid, "Setting cancelled.")
             if command == "/start":
                 if args and args[0].startswith("s_"):
                     return await self.start_share(uid, args[0][2:])
                 if args and args[0].startswith("r_"):
                     return await self.start_redeem(uid, args[0][2:])
-                return await self.say(uid, "👋 <b>BingoLink File Store</b>\nOpen a file-share link to unlock videos "
-                                            "through BingoLink.\n" +
-                                      ("As an uploader: send a video for a single link, or /bulk then /done "
-                                       "for several videos under one link." if await self.is_uploader(uid) else
-                                       "If you have a file link, open it to begin."))
+                return await self.themed_message(uid, "start", message["from"],
+                                                 await self.start_buttons())
             if command == "/id":
                 return await self.say(uid, f"Your Telegram ID: <code>{uid}</code>")
             if command == "/files":
@@ -661,12 +786,21 @@ class FileBot:
                 return await self.say(uid, "Share link → join checks → BingoLink article steps → one-time unlock → videos. "
                                            "Uploaders: /bulk, send videos, /done, /cancel, /files. Owner: /settings. /id shows your ID.")
             return await self.say(uid, "Unknown command. Send /help.")
-        if uid == self.owner and txt.strip():
+        if uid == self.owner:
             admin_input = await self.db.fetchrow("""SELECT action FROM blbot_admin_input
                  WHERE user_id=$1 AND created_at>NOW()-INTERVAL '10 minutes'""", uid)
             if admin_input:
-                await self.db.execute("DELETE FROM blbot_admin_input WHERE user_id=$1", uid)
-                return await self.manage_command(uid, "/" + admin_input["action"], txt.strip().split())
+                action = admin_input["action"]
+                if txt.strip().lower() == "/cancel":
+                    await self.db.execute("DELETE FROM blbot_admin_input WHERE user_id=$1", uid)
+                    return await self.say(uid, "Cancelled.")
+                if action in ("start_photo", "link_photo", "start_caption", "link_caption",
+                              "premium_url", "tutorial_url", "admin_contact", "powered_by",
+                              "download_label", "premium_label", "tutorial_label", "help_label", "close_label"):
+                    return await self.save_visual_setting(uid, action, message)
+                if txt.strip():
+                    await self.db.execute("DELETE FROM blbot_admin_input WHERE user_id=$1", uid)
+                    return await self.manage_command(uid, "/" + action, txt.strip().split())
         is_video = bool(message.get("video") or (message.get("document") or {}).get("mime_type", "").startswith("video/"))
         if is_video:
             if not await self.is_uploader(uid):
@@ -685,10 +819,37 @@ class FileBot:
             await self.tg("answerCallbackQuery", callback_query_id=cid)
         except TelegramError:
             pass
+        if value == "public:help":
+            return await self.say(user_id, "Send /start to open the bot. Open a shared file link, "
+                                  "join required chats and complete BingoLink to receive your files.")
+        if value == "public:close":
+            msg = call.get("message") or {}
+            if msg.get("message_id") and msg.get("chat", {}).get("id") == user_id:
+                try:
+                    await self.tg("deleteMessage", chat_id=user_id, message_id=msg["message_id"])
+                except TelegramError:
+                    await self.say(user_id, "Closed. Use /start to reopen.")
+            return
         if value.startswith("settings:"):
             if user_id != self.owner:
                 return await self.say(user_id, "Only the owner can change settings.")
             action = value.split(":")
+            if action[1] == "menu" and len(action) == 3:
+                return await self.settings_section(user_id, action[2])
+            if action[1] == "stats":
+                return await self.manage_command(user_id, "/stats", [])
+            if action[1] == "preview" and len(action) == 3 and action[2] in ("start", "link"):
+                demo = kb([row_button("DEMO DOWNLOAD", url="https://www.bingolink.site")]) if action[2] == "link" else await self.start_buttons()
+                return await self.themed_message(user_id, action[2], {"first_name": "Preview", "username": "preview"}, demo)
+            if action[1] == "toggle" and len(action) == 3 and action[2] in (
+                    "help_button", "close_button", "premium_button", "tutorial_button"):
+                old = await self.config(action[2], "on")
+                new = "off" if old == "on" else "on"
+                await self.set_config(action[2], new)
+                return await self.say(user_id, f"✅ {action[2]}: {new}")
+            if action[1] == "clear" and len(action) == 3 and action[2] in ("start_photo", "link_photo"):
+                await self.set_config(action[2], "")
+                return await self.say(user_id, "✅ Photo removed; text-only message will be used.")
             if action[1] == "forward":
                 old = await self.config("forward_allowed", "off")
                 await self.set_config("forward_allowed", "on" if old == "off" else "off")
@@ -699,6 +860,19 @@ class FileBot:
                 await self.set_config("auto_delete_minutes", action[2])
             elif action[1] == "prompt" and len(action) == 3:
                 prompts = {
+                    "start_photo": "Send the new START PHOTO.",
+                    "link_photo": "Send the new LINK-READY PHOTO.",
+                    "start_caption": "Send START caption (up to 800 characters). Placeholders: {first_name}, {username}, {powered_by}.",
+                    "link_caption": "Send LINK caption (up to 800 characters). Placeholders: {first_name}, {username}, {admin_contact}.",
+                    "premium_url": "Send the Premium HTTPS link.",
+                    "tutorial_url": "Send the Tutorial HTTPS link.",
+                    "admin_contact": "Send your contact, e.g. @YourAdminBot.",
+                    "powered_by": "Send your Powered By text, e.g. @YourChannel.",
+                    "download_label": "Send Download button label.",
+                    "premium_label": "Send Premium button label.",
+                    "tutorial_label": "Send Tutorial button label.",
+                    "help_label": "Send Help button label.",
+                    "close_label": "Send Close button label.",
                     "addjoin": "Send: <code>@PublicChannel public</code> OR <code>-100CHANNEL_ID private</code>. "
                                "For private chats the bot can create a request invite automatically.",
                     "rmjoin": "Send the chat ID to remove, e.g. <code>-1001234567890</code>.",
@@ -717,6 +891,10 @@ class FileBot:
                 return await self.settings_details(user_id)
             elif action[1] == "help":
                 return await self.settings_help(user_id)
+            if action[1] in ("forward", "delete"):
+                return await self.settings_section(user_id, "media")
+            if action[1] == "force":
+                return await self.settings_section(user_id, "join")
             return await self.settings_menu(user_id)
         if value == "checkjoin":
             pending = await self.db.fetchrow("SELECT * FROM blbot_pending WHERE user_id=$1", user_id)

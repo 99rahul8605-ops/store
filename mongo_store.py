@@ -56,7 +56,6 @@ class MongoStore:
         await self.col('blbot_unlocks').create_index([('user_id',1),('package_id',1),('created_at',-1)])
         await self.col('blbot_sent_media').create_index([('delete_at',1),('next_try_at',1)])
         await self.col('blbot_packages').create_index([('created_at',-1)])
-        await self.col('blbot_items').create_index([('package_id',1),('position',1)])
 
     async def close(self):
         await self.client.close()

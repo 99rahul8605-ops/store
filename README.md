@@ -49,3 +49,7 @@ Use `.env.example` for variable names only. Never commit an actual `.env` file, 
 - MongoDB is only for the new bot. **Do not remove `DATABASE_URL` from the BingoLink website**, which still needs its existing PostgreSQL database.
 
 The Python source has been syntax checked and offline logic tests are included in the release process, but live Telegram, MongoDB Atlas, and BingoLink integration were not available in this environment. Deploy a test bot before switching your production bot.
+
+
+## Compact, grouped bot settings
+Open `/settings` as the owner. Six submenus: Start Message, Link Message, Branding, Files & Backup, Force Join, and Sudo. The photo and caption of both public messages, Premium/Tutorial URLs, custom button labels, Admin Contact and Powered By text are editable through inline menus. Reply with a photo or text after tapping its field; `/cancel` aborts. Photos use Telegram file IDs (no external storage required). Values are saved in MongoDB's existing settings collection; no migrations. Start HELP/CLOSE and link PREMIUM/TUTORIAL buttons can each be toggled. Premium and tutorial buttons only show after a valid HTTPS URL has been saved. Use Preview to check both layouts. The bot retains the one-time BingoLink unlock flow and existing `/bulk`, force-join, sudo and auto-delete commands.
