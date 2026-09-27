@@ -24,6 +24,14 @@ LOG = logging.getLogger("bingolink_filebot")
 MAX_BULK = 30
 TOKEN_HOURS = 3
 PRIVATE_REQUEST_HOURS = 24
+DEFAULT_PUBLIC_HELP = (
+    "<b>ᴀʙᴏᴜᴛ ᴜs...</b>\n\n"
+    "<b>‣ ᴍᴀᴅᴇ ғᴏʀ : @Unholy_Realm</b>\n"
+    "<b>‣ ᴏᴡɴᴇʀ : ᴀɴᴏɴʏᴍᴏᴜs</b>\n"
+    "<b>‣ ᴘᴏᴡᴇʀᴇᴅ ʙʏ : @Unholy_Realm</b>\n"
+    "<b>‣ ᴅᴇᴠᴇʟᴏᴘᴇʀ : Anonymous</b>\n\n"
+    "<b>ᴀᴅɪᴏs !!</b>"
+)
 DELETE_MAX_MINUTES = 47 * 60  # Telegram normally refuses to delete messages after 48h.
 
 
@@ -208,13 +216,38 @@ class FileBot:
                 LOG.warning("Saved %s photo failed; falling back to text: %s", kind, exc)
         return await self.say(chat, caption, buttons)
 
+    async def public_help_text(self) -> str:
+        custom = await self.config("public_help_text", "")
+        # Admin-defined text is plain text so Telegram HTML cannot be injected.
+        return html.escape(custom) if custom else DEFAULT_PUBLIC_HELP
+
+    async def help_buttons(self):
+        return kb([
+            row_button("⬅️ BACK", data="public:back"),
+            row_button("✖️ CLOSE", data="public:close"),
+        ])
+
+    async def send_help(self, user_id: int):
+        message = await self.public_help_text()
+        photo = await self.config("help_photo", "")
+        buttons = await self.help_buttons()
+        if photo:
+            try:
+                return await self.tg("sendPhoto", chat_id=user_id, photo=photo,
+                                     caption=message[:1024], parse_mode="HTML",
+                                     reply_markup=buttons)
+            except TelegramError as exc:
+                LOG.warning("HELP photo failed; falling back to text: %s", exc)
+        return await self.say(user_id, message, buttons)
+
     async def start_buttons(self):
-        rows = []
+        buttons = []
         if await self.config("help_button", "on") == "on":
-            rows.append([row_button(await self.config("help_label", "HELP"), data="public:help")])
+            buttons.append(row_button(await self.config("help_label", "HELP"), data="public:help"))
         if await self.config("close_button", "on") == "on":
-            rows.append([row_button(await self.config("close_label", "CLOSE"), data="public:close")])
-        return kb(*rows) if rows else None
+            buttons.append(row_button(await self.config("close_label", "CLOSE"), data="public:close"))
+        # Two compact side-by-side Telegram inline buttons on one row.
+        return kb(buttons) if buttons else None
 
     async def link_buttons(self, short: str):
         rows = [[row_button(await self.config("download_label", "• CLICK HERE TO DOWNLOAD •"), url=short)]]
@@ -240,7 +273,11 @@ class FileBot:
                     [row_button("HELP on/off", data="settings:toggle:help_button"),
                      row_button("CLOSE on/off", data="settings:toggle:close_button")],
                     [row_button("✏️ HELP Label", data="settings:prompt:help_label"),
-                     row_button("✏️ CLOSE Label", data="settings:prompt:close_label")], back))
+                     row_button("✏️ CLOSE Label", data="settings:prompt:close_label")],
+                    [row_button("📝 Edit HELP Message", data="settings:prompt:public_help_text")],
+                    [row_button("📷 Set HELP Photo", data="settings:prompt:help_photo"),
+                     row_button("🗑 Remove HELP Photo", data="settings:clear:help_photo")],
+                    [row_button("👁 Preview HELP", data="settings:preview:help")], back))
         elif section == "link":
             await self.say(user_id, "🔗 <b>Link Ready Message</b>\nSet photo, caption, download and "
                 "premium/tutorial buttons. Premium and tutorial buttons appear only when URLs are set.", kb(
@@ -287,13 +324,13 @@ class FileBot:
 
     async def save_visual_setting(self, user_id: int, action: str, message: dict):
         text = (message.get("text") or message.get("caption") or "").strip()
-        if action in ("start_photo", "link_photo"):
+        if action in ("start_photo", "link_photo", "help_photo"):
             photos = message.get("photo") or []
             photo = photos[-1].get("file_id") if photos else None
             if not photo:
                 return await self.say(user_id, "Send a PHOTO (not as a document), or /cancel.")
             await self.set_config(action, photo)
-        elif action in ("start_caption", "link_caption"):
+        elif action in ("start_caption", "link_caption", "public_help_text"):
             if not text or len(text) > 800:
                 return await self.say(user_id, "Send text of 1–800 characters, or /cancel.")
             await self.set_config(action, text)
@@ -783,8 +820,7 @@ class FileBot:
                     return await self.finish_bulk(uid)
                 return await self.cancel_bulk(uid)
             if command == "/help":
-                return await self.say(uid, "Share link → join checks → BingoLink article steps → one-time unlock → videos. "
-                                           "Uploaders: /bulk, send videos, /done, /cancel, /files. Owner: /settings. /id shows your ID.")
+                return await self.send_help(uid)
             return await self.say(uid, "Unknown command. Send /help.")
         if uid == self.owner:
             admin_input = await self.db.fetchrow("""SELECT action FROM blbot_admin_input
@@ -794,7 +830,7 @@ class FileBot:
                 if txt.strip().lower() == "/cancel":
                     await self.db.execute("DELETE FROM blbot_admin_input WHERE user_id=$1", uid)
                     return await self.say(uid, "Cancelled.")
-                if action in ("start_photo", "link_photo", "start_caption", "link_caption",
+                if action in ("start_photo", "link_photo", "help_photo", "start_caption", "link_caption", "public_help_text",
                               "premium_url", "tutorial_url", "admin_contact", "powered_by",
                               "download_label", "premium_label", "tutorial_label", "help_label", "close_label"):
                     return await self.save_visual_setting(uid, action, message)
@@ -820,8 +856,16 @@ class FileBot:
         except TelegramError:
             pass
         if value == "public:help":
-            return await self.say(user_id, "Send /start to open the bot. Open a shared file link, "
-                                  "join required chats and complete BingoLink to receive your files.")
+            return await self.send_help(user_id)
+        if value == "public:back":
+            msg = call.get("message") or {}
+            if msg.get("message_id") and msg.get("chat", {}).get("id") == user_id:
+                try:
+                    await self.tg("deleteMessage", chat_id=user_id, message_id=msg["message_id"])
+                except TelegramError:
+                    pass
+            return await self.themed_message(user_id, "start", call["from"],
+                                             await self.start_buttons())
         if value == "public:close":
             msg = call.get("message") or {}
             if msg.get("message_id") and msg.get("chat", {}).get("id") == user_id:
@@ -838,6 +882,8 @@ class FileBot:
                 return await self.settings_section(user_id, action[2])
             if action[1] == "stats":
                 return await self.manage_command(user_id, "/stats", [])
+            if action[1] == "preview" and len(action) == 3 and action[2] == "help":
+                return await self.send_help(user_id)
             if action[1] == "preview" and len(action) == 3 and action[2] in ("start", "link"):
                 demo = kb([row_button("DEMO DOWNLOAD", url="https://www.bingolink.site")]) if action[2] == "link" else await self.start_buttons()
                 return await self.themed_message(user_id, action[2], {"first_name": "Preview", "username": "preview"}, demo)
@@ -847,7 +893,7 @@ class FileBot:
                 new = "off" if old == "on" else "on"
                 await self.set_config(action[2], new)
                 return await self.say(user_id, f"✅ {action[2]}: {new}")
-            if action[1] == "clear" and len(action) == 3 and action[2] in ("start_photo", "link_photo"):
+            if action[1] == "clear" and len(action) == 3 and action[2] in ("start_photo", "link_photo", "help_photo"):
                 await self.set_config(action[2], "")
                 return await self.say(user_id, "✅ Photo removed; text-only message will be used.")
             if action[1] == "forward":
@@ -862,6 +908,7 @@ class FileBot:
                 prompts = {
                     "start_photo": "Send the new START PHOTO.",
                     "link_photo": "Send the new LINK-READY PHOTO.",
+                    "help_photo": "Send the new HELP PHOTO (as a Telegram photo).",
                     "start_caption": "Send START caption (up to 800 characters). Placeholders: {first_name}, {username}, {powered_by}.",
                     "link_caption": "Send LINK caption (up to 800 characters). Placeholders: {first_name}, {username}, {admin_contact}.",
                     "premium_url": "Send the Premium HTTPS link.",
@@ -871,6 +918,7 @@ class FileBot:
                     "download_label": "Send Download button label.",
                     "premium_label": "Send Premium button label.",
                     "tutorial_label": "Send Tutorial button label.",
+                    "public_help_text": "Send the new HELP message as plain text (up to 800 characters).",
                     "help_label": "Send Help button label.",
                     "close_label": "Send Close button label.",
                     "addjoin": "Send: <code>@PublicChannel public</code> OR <code>-100CHANNEL_ID private</code>. "
