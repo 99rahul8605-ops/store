@@ -174,7 +174,7 @@ class MongoStore:
             return f'DELETE {r.deleted_count}'
         elif q.startswith('insert into blbot_unlocks'):
             await c('blbot_unlocks').insert_one({'token_hash':p[0],'package_id':p[1],'user_id':p[2],
-                'status':'issued','delivery_cursor':0,'short_url':None,'created_at':t,'expires_at':t+timedelta(hours=3),'claimed_at':None},**kw)
+                'status':'issued','delivery_cursor':0,'short_url':None,'created_at':t,'expires_at':t+timedelta(hours=1),'claimed_at':None},**kw)
         elif q.startswith('update blbot_unlocks set short_url='):
             await c('blbot_unlocks').update_one({'token_hash':p[0]},{'$set':{'short_url':p[1]}},**kw)
         elif q.startswith('delete from blbot_unlocks where token_hash='):

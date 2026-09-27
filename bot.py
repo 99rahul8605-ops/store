@@ -447,7 +447,7 @@ class FileBot:
             token_hash = digest(fresh_id(24))
             await self.db.execute("""INSERT INTO blbot_unlocks
                 (token_hash,package_id,user_id,expires_at)
-                VALUES($1,$2,$3,NOW()+INTERVAL '3 hours')""", token_hash, package_id, user_id)
+                VALUES($1,$2,$3,NOW()+INTERVAL '1 hour')""", token_hash, package_id, user_id)
             await self.deliver(user_id, token_hash)
 
     async def start_share(self, user_id: int, package_id: str):
@@ -481,7 +481,7 @@ class FileBot:
                 deep_link = f"https://t.me/{self.bot_username}?start=r_{token}"
                 await self.db.execute("""INSERT INTO blbot_unlocks
                   (token_hash,package_id,user_id,expires_at)
-                  VALUES($1,$2,$3,NOW()+INTERVAL '3 hours')""", token_hash, package_id, user_id)
+                  VALUES($1,$2,$3,NOW()+INTERVAL '1 hour')""", token_hash, package_id, user_id)
                 try:
                     async with self.http.post(
                         self.shortener + "/api/v1/links",
