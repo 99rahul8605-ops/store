@@ -51,6 +51,7 @@ class MongoStore:
             'blbot_unlocks':[('token_hash',1)], 'blbot_pending':[('user_id',1)],
             'blbot_admin_input':[('user_id',1)], 'blbot_sent_media':[('chat_id',1),('message_id',1)],
         }
+        indexes['blbot_premium'] = [('user_id', 1)]
         for collection, fields in indexes.items():
             await self.col(collection).create_index(fields, unique=True)
         await self.col('blbot_unlocks').create_index([('user_id',1),('package_id',1),('created_at',-1)])

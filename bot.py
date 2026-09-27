@@ -305,7 +305,10 @@ class FileBot:
                 [row_button("Delete OFF", data="settings:delete:0"), row_button("5m", data="settings:delete:5"),
                  row_button("30m", data="settings:delete:30")],
                 [row_button("1h", data="settings:delete:60"), row_button("6h", data="settings:delete:360"),
-                 row_button("24h", data="settings:delete:1440")], back))
+                 row_button("24h", data="settings:delete:1440")],
+                [row_button("⭐ Add Premium", data="settings:prompt:addprem"),
+                 row_button("✖ Remove Premium", data="settings:prompt:rmprem")],
+                [row_button("📋 Premium Users", data="settings:premium:list")], back))
         elif section == "join":
             force = await self.config("force_join", "on")
             await self.say(user_id, f"🔒 <b>Force Join</b>\nStatus: {force}\nPrivate requests count for 24h.", kb(
@@ -427,6 +430,26 @@ class FileBot:
     async def package(self, package_id: str):
         return await self.db.fetchrow("SELECT * FROM blbot_packages WHERE id=$1 AND published=TRUE", package_id)
 
+    async def premium_until(self, user_id: int):
+        """Return a UTC expiry only for active premium members."""
+        record = await self.db.col("blbot_premium").find_one(
+            {"user_id": user_id, "expires_at": {"$gt": datetime.now(timezone.utc)}}
+        )
+        return record["expires_at"] if record else None
+
+    async def deliver_premium(self, user_id: int, package_id: str):
+        """Issue an internal, one-use delivery token; do not create a short URL."""
+        if not await self.premium_until(user_id):
+            return await self.issue_shortlink(user_id, package_id)
+        async with self.lock(f"premium:{user_id}:{package_id}"):
+            if not await self.package(package_id):
+                return await self.say(user_id, "This file link is no longer available.")
+            token_hash = digest(fresh_id(24))
+            await self.db.execute("""INSERT INTO blbot_unlocks
+                (token_hash,package_id,user_id,expires_at)
+                VALUES($1,$2,$3,NOW()+INTERVAL '3 hours')""", token_hash, package_id, user_id)
+            await self.deliver(user_id, token_hash)
+
     async def start_share(self, user_id: int, package_id: str):
         if not await self.package(package_id):
             await self.say(user_id, "This file link is invalid or no longer available.")
@@ -436,10 +459,15 @@ class FileBot:
         if missing:
             await self.join_prompt(user_id, missing)
             return
-        await self.issue_shortlink(user_id, package_id)
         await self.pending_clear(user_id)
+        if await self.premium_until(user_id):
+            return await self.deliver_premium(user_id, package_id)
+        await self.issue_shortlink(user_id, package_id)
 
     async def issue_shortlink(self, user_id: int, package_id: str):
+        # Covers Try Again as well as direct links, not just the initial /start route.
+        if await self.premium_until(user_id):
+            return await self.deliver_premium(user_id, package_id)
         async with self.lock(f"issue:{user_id}:{package_id}"):
             previous = await self.db.fetchrow("""SELECT short_url FROM blbot_unlocks
                WHERE user_id=$1 AND package_id=$2 AND status='issued'
@@ -568,19 +596,17 @@ class FileBot:
             if count >= MAX_BULK:
                 await self.say(user_id, f"Bulk limit: {MAX_BULK} videos. Send /done.")
                 return
+        # Copy, don't forward: backup posts won't expose the uploader's
+        # Telegram name or the "Forwarded from" source attribution.
         try:
-            saved = await self.tg("forwardMessage", chat_id=backup,
-                                  from_chat_id=message["chat"]["id"], message_id=message["message_id"],
+            saved = await self.tg("copyMessage", chat_id=backup,
+                                  from_chat_id=message["chat"]["id"],
+                                  message_id=message["message_id"],
                                   disable_notification=True)
         except TelegramError:
-            # For content that cannot be forwarded, Telegram may permit copying.
-            try:
-                saved = await self.tg("copyMessage", chat_id=backup,
-                                      from_chat_id=message["chat"]["id"], message_id=message["message_id"])
-            except TelegramError:
-                await self.say(user_id, "Telegram couldn't save this video to the backup channel. "
-                                        "Check bot admin permissions and source restrictions.")
-                return
+            await self.say(user_id, "Telegram couldn't copy this video to the backup channel. "
+                                    "Check bot admin permissions and source restrictions.")
+            return
         async with self.db.acquire() as conn:
             async with conn.transaction():
                 if not draft:
@@ -670,6 +696,9 @@ class FileBot:
           "<code>/rmjoin -1001234567890</code>\n"
           "<code>/addsudo 123456789</code>\n"
           "<code>/remsudo 123456789</code>\n"
+          "<code>/addprem 123456789 30</code> (30 days)\n"
+          "<code>/rmprem 123456789</code>\n"
+          "<code>/premusers</code> • <code>/prem</code>\n"
           "<code>/setdelete 60</code> (0–2820 min)\n"
           "<code>/forward on</code> or <code>/forward off</code>\n"
           "<code>/forcejoin on</code> or <code>/forcejoin off</code>\n"
@@ -690,6 +719,31 @@ class FileBot:
                (SELECT COUNT(*) FROM blbot_unlocks WHERE status='used') completed_unlocks""")
             return await self.say(user_id, "📊 <b>Bot statistics</b>\n" +
                                   "\n".join(f"{k}: {v}" for k, v in dict(stats).items()))
+        if command in ("/addprem", "/rmprem", "/premusers"):
+            collection = self.db.col("blbot_premium")
+            if command == "/premusers":
+                records = collection.find({"expires_at": {"$gt": datetime.now(timezone.utc)}}).sort("expires_at", 1).limit(30)
+                lines = [f"<code>{r['user_id']}</code> — until {r['expires_at'].astimezone(timezone.utc):%Y-%m-%d %H:%M} UTC"
+                         async for r in records]
+                return await self.say(user_id, "⭐ <b>Active premium users</b>\n" + ("\n".join(lines) or "None"))
+            if command == "/addprem":
+                if len(args) != 2 or not args[0].isdigit() or not args[1].isdigit() or not 1 <= int(args[1]) <= 3650:
+                    return await self.say(user_id, "Usage: /addprem TELEGRAM_USER_ID DAYS (1–3650)")
+                target, days = int(args[0]), int(args[1])
+                if target <= 0:
+                    return await self.say(user_id, "Use a valid numeric Telegram user ID.")
+                # Renewals extend current active expiry; expired subscriptions start now.
+                current = await collection.find_one({"user_id": target})
+                now = datetime.now(timezone.utc)
+                base = max(now, current["expires_at"]) if current else now
+                expires = base + timedelta(days=days)
+                await collection.update_one({"user_id": target},
+                    {"$set": {"expires_at": expires, "updated_at": now}}, upsert=True)
+                return await self.say(user_id, f"✅ Premium added for <code>{target}</code> until {expires:%Y-%m-%d %H:%M} UTC")
+            if len(args) != 1 or not args[0].isdigit() or int(args[0]) <= 0:
+                return await self.say(user_id, "Usage: /rmprem TELEGRAM_USER_ID")
+            await collection.delete_one({"user_id": int(args[0])})
+            return await self.say(user_id, "✅ Premium removed. This user will use the shortener for new requests.")
         if command == "/setbackup":
             if len(args) != 1 or not re.fullmatch(r"-?\d+", args[0]):
                 return await self.say(user_id, "Usage: /setbackup -100CHANNEL_ID")
@@ -790,6 +844,11 @@ class FileBot:
                     return await self.start_redeem(uid, args[0][2:])
                 return await self.themed_message(uid, "start", message["from"],
                                                  await self.start_buttons())
+            if command == "/prem":
+                expires = await self.premium_until(uid)
+                if expires:
+                    return await self.say(uid, f"⭐ <b>Premium active</b> until {expires:%Y-%m-%d %H:%M} UTC. Your file links skip the shortener.")
+                return await self.say(uid, "You do not have an active premium subscription.")
             if command == "/id":
                 return await self.say(uid, f"Your Telegram ID: <code>{uid}</code>")
             if command == "/files":
@@ -809,7 +868,8 @@ class FileBot:
                 return await self.say(uid, "<b>Your recent share links</b>\n" +
                                       ("\n".join(lines) if lines else "No bundles yet."))
             if command in ("/settings", "/stats", "/setbackup", "/addjoin", "/rmjoin",
-                           "/addsudo", "/remsudo", "/setdelete", "/forward", "/forcejoin"):
+                           "/addsudo", "/remsudo", "/setdelete", "/forward", "/forcejoin",
+                           "/addprem", "/rmprem", "/premusers"):
                 return await self.manage_command(uid, command, args)
             if command in ("/bulk", "/done", "/cancel"):
                 if not await self.is_uploader(uid):
@@ -926,6 +986,8 @@ class FileBot:
                     "rmjoin": "Send the chat ID to remove, e.g. <code>-1001234567890</code>.",
                     "addsudo": "Send the uploader's numeric Telegram ID, e.g. <code>123456789</code>.",
                     "remsudo": "Send the sudo user's numeric Telegram ID to remove.",
+                    "addprem": "Send: <code>TELEGRAM_USER_ID DAYS</code>, e.g. <code>123456789 30</code>.",
+                    "rmprem": "Send the numeric Telegram ID of the user whose premium should be removed.",
                     "setbackup": "Send the numeric backup-channel ID, e.g. <code>-1001234567890</code>. "
                                  "The bot must already be channel admin with Post Messages permission.",
                 }
@@ -935,6 +997,8 @@ class FileBot:
                          VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE
                          SET action=EXCLUDED.action,created_at=NOW()""", user_id, chosen)
                     return await self.say(user_id, prompts[chosen] + "\n\nYou have 10 minutes to reply.")
+            elif action[1] == "premium" and len(action) == 3 and action[2] == "list":
+                return await self.manage_command(user_id, "/premusers", [])
             elif action[1] == "details":
                 return await self.settings_details(user_id)
             elif action[1] == "help":
@@ -956,6 +1020,8 @@ class FileBot:
                 return await self.deliver(user_id, pending["claim_hash"])
             pkg = pending["package_id"]
             await self.pending_clear(user_id)
+            if await self.premium_until(user_id):
+                return await self.deliver_premium(user_id, pkg)
             return await self.issue_shortlink(user_id, pkg)
         if value.startswith("retryshare:"):
             return await self.start_share(user_id, value.split(":", 1)[1])
